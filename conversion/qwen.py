@@ -341,7 +341,7 @@ class _QwenMtpMixin:
             keep = name in (
                 "model.embed_tokens.weight", "model.norm.weight", "lm_head.weight",
                 "embed_tokens.weight", "norm.weight",
-            )
+            ) or name.startswith("model.hyper_connection_mixer.")
             if not keep:
                 return None
         return name, gen
