@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <cinttypes>
 #include <fstream>
 #include <mutex>
@@ -311,7 +312,12 @@ static bool tensor_allows_quantization(const llama_model_quantize_params * param
 
     // do not quantize expert gating tensors
     // NOTE: can't use LLM_TN here because the layer number is not known
-    quantize &= name.find("ffn_gate_inp.weight") == std::string::npos;
+    // qwen4exp: routern ar 62,9M params (512 exp x 2560 x 48 lager) = 252 MB/token
+    // i F32, 4 % av tokenbudgeten. LLAMA_QUANT_ALLOW_ROUTER=1 later en explicit
+    // --tensor-type ffn_gate_inp=... galla i stallet for det har laset.
+    if (getenv("LLAMA_QUANT_ALLOW_ROUTER") == nullptr) {
+        quantize &= name.find("ffn_gate_inp.weight") == std::string::npos;
+    }
 
     // do not quantize the i32 token-id -> expert-id routing table (DeepSeek-V4)
     quantize &= name.find("ffn_gate_tid2eid.weight") == std::string::npos;
