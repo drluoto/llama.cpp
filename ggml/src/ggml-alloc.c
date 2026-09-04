@@ -923,6 +923,28 @@ static bool ggml_gallocr_reserve_n_impl(
             }
         }
         if (realloc) {
+            // Geometrisk tillvaxt i stallet for exakt passform. qwen4exp:s QSA-tensorer
+            // vaxer med n_kv, sa varje prefill-ubatch gjorde grafen storre och tvingade
+            // en full free+alloc av compute-bufferten (~500 MB GTT pa Strix Halo = ~1,5 s,
+            // matt med LLAMA_GRAPH_TIMING: alloc 1247->2017 ms over 105 ubatchar, 6 ms
+            // efterat). Med faktor 1,5 blir antalet omallokeringar O(log n) i stallet
+            // for O(n_ubatch). GGML_GALLOC_GROWTH=1.0 stanger av (A/B).
+            {
+                static double growth = -1.0;
+                if (growth < 0) {
+                    const char * env = getenv("GGML_GALLOC_GROWTH");
+                    growth = env ? atof(env) : 1.5;
+                    if (growth < 1.0) growth = 1.0;
+                }
+                for (int c = 0; c < galloc->buf_tallocs[i]->n_chunks; c++) {
+                    size_t cur  = galloc->buffers[i] ? ggml_vbuffer_chunk_size(galloc->buffers[i], c) : 0;
+                    size_t want = (size_t)((double) cur * growth);
+                    struct tallocr_chunk * ch = galloc->buf_tallocs[i]->chunks[c];
+                    if (want > ch->max_size && want <= galloc->buf_tallocs[i]->max_chunk_size) {
+                        ch->max_size = want;
+                    }
+                }
+            }
 #ifndef NDEBUG
             {
                 size_t cur_size = galloc->buffers[i] ? ggml_vbuffer_size(galloc->buffers[i]) : 0;
