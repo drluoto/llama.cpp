@@ -10785,7 +10785,9 @@ static bool ggml_vk_use_mul_mat_vec_id(const struct ggml_cgraph * cgraph, int no
     ggml_tensor * dst = cgraph->nodes[node_idx];
     ggml_tensor * src0 = dst->src[0];
     ggml_tensor * src2 = dst->src[2];
-    return (src2->ne[1] <= 8) && (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16 || ggml_is_quantized(src0->type));
+    // #25356 andra halvan: MoE-expertvagen (mul_mat_id) foljer samma runtime-grans som mul_mat.
+    // Vid -np 3 x (1+utkast) ~ 12 tokens foll den annars till tile-vagen (klippan 8->9 pa gfx1151).
+    return (src2->ne[1] <= (int64_t) ggml_vk_mmv_max_cols()) && (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16 || ggml_is_quantized(src0->type));
 }
 
 static void ggml_vk_mul_mat_id(ggml_backend_vk_context * ctx, vk_context& subctx, const struct ggml_cgraph * cgraph, int node_idx) {
