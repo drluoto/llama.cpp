@@ -2449,6 +2449,11 @@ struct ggml_backend_vk_context {
     int num_additional_fused_ops {};
     // en efterfoljande SCALE absorberad i RMS_NORM/MULTI_ADD (push-konstant)
     bool  fused_scale_tail {};
+    // GGML_VK_DISABLE_SCALE_FUSION = 1 | rms | multi  (bisektering)
+    static bool scale_fusion_off(const char * which) {
+        static const char * env = getenv("GGML_VK_DISABLE_SCALE_FUSION");
+        return env && (env[0] == '1' || strstr(env, which) != nullptr);
+    }
     float fused_out_scale {1.0f};
     // Bitmask of which fused ops need to write an intermediate value to memory.
     // Bit 'i' means nodes[start_of_fusion + i] writes to memory.
@@ -17717,7 +17722,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
                 // en efterfoljande SCALE (utan bias) absorberas i multi_add-kärnan
                 {
                     const int last = i + ctx->num_additional_fused_ops;
-                    if (last + 1 < cgraph->n_nodes && cgraph->nodes[last + 1]->op == GGML_OP_SCALE &&
+                    if (!ggml_backend_vk_context::scale_fusion_off("multi") && last + 1 < cgraph->n_nodes && cgraph->nodes[last + 1]->op == GGML_OP_SCALE &&
                         ggml_get_op_params_f32(cgraph->nodes[last + 1], 1) == 0.0f &&
                         cgraph->nodes[last + 1]->type == GGML_TYPE_F32 &&
                         ggml_can_fuse(cgraph, last, { GGML_OP_ADD, GGML_OP_SCALE })) {
@@ -17799,7 +17804,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
                 // they are overwritten, and one workgroup per row. So close enough.
                 op_srcs_fused_elementwise[0] = true;
                 op_srcs_fused_elementwise[1] = true;
-            } else if (ggml_vk_can_fuse(ctx, cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_SCALE }) &&
+            } else if (!ggml_backend_vk_context::scale_fusion_off("rms") && ggml_vk_can_fuse(ctx, cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_SCALE }) &&
                        ggml_get_op_params_f32(cgraph->nodes[i + 1], 1) == 0.0f &&
                        cgraph->nodes[i]->type == GGML_TYPE_F32 && cgraph->nodes[i + 1]->type == GGML_TYPE_F32) {
                 // rms_norm foljd av ren skalning (qwen4exp l2-norm = rms_norm * 1/sqrt n): skalan in via param2
