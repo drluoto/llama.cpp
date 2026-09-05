@@ -119,7 +119,7 @@ static void common_debug_print_tensor(uint8_t * data, ggml_type type, const int6
             LOG(INDENT INDENT "],\n");
         }
         LOG(INDENT "]\n");
-        LOG(INDENT "sum = %f\n", sum);
+        LOG(INDENT "sum = %.10g\n", (double) sum);
     }
 
     if (abort_on_nan) {
