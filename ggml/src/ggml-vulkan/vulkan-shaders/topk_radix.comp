@@ -1,6 +1,8 @@
 #version 450
 
 #extension GL_EXT_control_flow_attributes : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
 
 #include "types.glsl"
 
@@ -30,8 +32,7 @@ layout (push_constant) uniform parameter {
 shared uint hist[256];
 shared uint sh_prefix;
 shared uint sh_rank;
-shared uint sh_greater;
-shared uint sh_equal;
+shared uint sg_cnt[64];  // traffar per subgrupp for den deterministiska plats-scannen
 
 // map float bits to uint such that unsigned comparison matches float comparison
 uint f2ui(float x) {
@@ -92,27 +93,44 @@ void main() {
         pmask |= 255u << shift;
     }
 
-    // gather: all elements strictly greater than the threshold key are in the top k,
-    // ties on the exact threshold fill the remaining `rank` slots
-    if (tid == 0u) {
-        sh_greater = 0u;
-        sh_equal   = 0u;
-    }
-    barrier();
-
+    // gather: allt strikt storre an troskeln ar i top-k, ties pa troskeln fyller de
+    // aterstaende `rank` platserna. Platserna kommer fran en exklusiv scan over
+    // kandidatflaggorna, en chunk i taget i stigande kolumnordning, sa att utdatan ar
+    // identisk varje korning (port av nathanw1014 b2035750). Den tidigare atomicAdd-
+    // raknaren gjorde ORDNINGEN schemalaggningsberoende och vid ties aven MANGDEN:
+    // ett annat tied element foll bort varje gang, och bruset kaskaderade genom QSA.
     const uint threshold = prefix;
     const uint out_base  = row*p.k;
 
-    for (uint col = tid; col < p.ncols_input; col += wgs) {
-        const uint key = f2ui(data_a[base + col]);
-        if (key > threshold) {
-            const uint pos = atomicAdd(sh_greater, 1u);
-            data_d[out_base + pos] = int(col);
-        } else if (key == threshold) {
-            const uint pos = atomicAdd(sh_equal, 1u);
-            if (pos < rank) {
-                data_d[out_base + (p.k - rank) + pos] = int(col);
+    uint slot_base = 0u;
+    [[dont_unroll]] for (uint pass = 0u; pass < 2u; ++pass) {
+        for (uint c = 0u; c < p.ncols_input; c += wgs) {
+            const uint col = c + tid;
+            bool hit = false;
+            if (col < p.ncols_input) {
+                const uint key = f2ui(data_a[base + col]);
+                hit = (pass == 0u) ? (key > threshold) : (key == threshold);
             }
+            const uvec4 ballot  = subgroupBallot(hit);
+            const uint  rank_sg = subgroupBallotExclusiveBitCount(ballot);
+            const uint  cnt_sg  = subgroupBallotBitCount(ballot);
+            if (subgroupElect()) {
+                sg_cnt[gl_SubgroupID] = cnt_sg;
+            }
+            barrier();
+            uint sg_base = 0u;
+            uint total   = 0u;
+            for (uint sg = 0u; sg < gl_NumSubgroups; ++sg) {
+                const uint v = sg_cnt[sg];
+                sg_base += (sg < gl_SubgroupID) ? v : 0u;
+                total   += v;
+            }
+            const uint slot = slot_base + sg_base + rank_sg;
+            if (hit && slot < p.k) {
+                data_d[out_base + slot] = int(col);
+            }
+            slot_base += total;
+            barrier();
         }
     }
 }
