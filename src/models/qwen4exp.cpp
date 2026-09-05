@@ -525,6 +525,33 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
     }
 
     ggml_tensor * logits = build_lora_mm(model.output, final, model.output_s);
+
+    if (model.d2t && model.d2t->ne[0] == (int64_t) model.vocab.n_tokens()) {
+        // FR-Spec, invers karta (t2d): samla fulla logits med get_rows ur [n_out, n_draft+1], sista raden -inf
+        const int64_t n_outputs    = logits->ne[1];
+        const int64_t n_vocab_full = (int64_t) model.vocab.n_tokens();
+        GGML_ASSERT(model.d2t->type == GGML_TYPE_I32);
+        ggml_tensor * ct   = ggml_cont(ctx0, ggml_transpose(ctx0, logits));                                   // [n_out, n_draft]
+        ggml_tensor * sent = ggml_fill(ctx0, ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_outputs, 1), -INFINITY);  // [n_out, 1]
+        ggml_tensor * ext  = ggml_concat(ctx0, ct, sent, 1);                                                  // [n_out, n_draft+1]
+        ggml_tensor * full = ggml_get_rows(ctx0, ext, model.d2t);                                             // [n_out, n_vocab]
+        logits = ggml_cont(ctx0, ggml_transpose(ctx0, full));                                                 // [n_vocab, n_out]
+        GGML_ASSERT(logits->ne[0] == n_vocab_full && logits->ne[1] == n_outputs);
+        cb(logits, "result_output_t2d", -1);
+    } else if (model.d2t) {
+        // FR-Spec, d2t: sprid de komprimerade logitsen till full vokabularform (ovriga -inf) med set_rows
+        const int64_t n_draft_vocab = logits->ne[0];
+        const int64_t n_outputs     = logits->ne[1];
+        const int64_t n_vocab_full  = (int64_t) model.vocab.n_tokens();
+        GGML_ASSERT(model.d2t->type == GGML_TYPE_I64 || model.d2t->type == GGML_TYPE_I32);
+        GGML_ASSERT(model.d2t->ne[0] == n_draft_vocab);
+        ggml_tensor * fulla = ggml_fill(ctx0, ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, 1, n_vocab_full, n_outputs), -INFINITY);
+        logits = ggml_set_rows(ctx0, fulla,
+                ggml_reshape_3d(ctx0, logits,    1,             n_draft_vocab, n_outputs),
+                ggml_reshape_3d(ctx0, model.d2t, n_draft_vocab, 1,             1));
+        logits = ggml_reshape_2d(ctx0, logits, n_vocab_full, n_outputs);
+        cb(logits, "result_output_d2t", -1);
+    }
     cb(logits, "result_output", -1);
 
     res->t_logits = logits;
@@ -717,35 +744,6 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
 
     cur = build_lora_mm(model.output, cur, model.output_s);
     cb(cur, "result_output", -1);
-
-    if (model.d2t && model.d2t->ne[0] == (int64_t) model.vocab.n_tokens()) {
-        // invers karta (t2d): samla fulla logits med get_rows ur [n_out, n_draft+1] dar sista raden ar -inf
-        const int64_t n_draft_vocab = cur->ne[0];
-        const int64_t n_outputs     = cur->ne[1];
-        const int64_t n_vocab_full  = (int64_t) model.vocab.n_tokens();
-        GGML_ASSERT(model.d2t->type == GGML_TYPE_I32);
-        ggml_tensor * ct   = ggml_cont(ctx0, ggml_transpose(ctx0, cur));                                    // [n_out, n_draft]
-        ggml_tensor * sent = ggml_fill(ctx0, ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_outputs, 1), -INFINITY); // [n_out, 1]
-        ggml_tensor * ext  = ggml_concat(ctx0, ct, sent, 1);                                                // [n_out, n_draft+1]
-        ggml_tensor * full = ggml_get_rows(ctx0, ext, model.d2t);                                           // [n_out, n_vocab]
-        cur = ggml_cont(ctx0, ggml_transpose(ctx0, full));                                                  // [n_vocab, n_out]
-        GGML_ASSERT(cur->ne[0] == n_vocab_full && cur->ne[1] == n_outputs && n_draft_vocab > 0);
-        cb(cur, "result_output_t2d", -1);
-    } else if (model.d2t) {
-        // sprid de komprimerade logitsen till full vokabularform (ovriga -inf), sa att
-        // sampling/verifiering aldrig behover veta att utkastet bara poangsatte en delmangd
-        const int64_t n_draft_vocab = cur->ne[0];
-        const int64_t n_outputs     = cur->ne[1];
-        const int64_t n_vocab_full  = (int64_t) model.vocab.n_tokens();
-        GGML_ASSERT(model.d2t->type == GGML_TYPE_I64 || model.d2t->type == GGML_TYPE_I32);
-        GGML_ASSERT(model.d2t->ne[0] == n_draft_vocab);
-        ggml_tensor * logits = ggml_fill(ctx0, ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, 1, n_vocab_full, n_outputs), -INFINITY);
-        cur = ggml_set_rows(ctx0, logits,
-                ggml_reshape_3d(ctx0, cur,       1,             n_draft_vocab, n_outputs),
-                ggml_reshape_3d(ctx0, model.d2t, n_draft_vocab, 1,             1));
-        cur = ggml_reshape_2d(ctx0, cur, n_vocab_full, n_outputs);
-        cb(cur, "result_output_d2t", -1);
-    }
     res->t_logits = cur;
 
     ggml_build_forward_expand(gf, cur);
