@@ -12666,7 +12666,8 @@ static void ggml_vk_multi_add(ggml_backend_vk_context * ctx, vk_context& subctx,
     pc.rms_partials = ctx->do_add_rms_partials;
     pc.scale = ctx->fused_scale_tail ? ctx->fused_out_scale : 1.0f;
 
-    vk_pipeline pipeline = ggml_vk_op_get_pipeline(ctx, tensors[0], tensors[1], nullptr, dst, dst->op);
+    // dst kan vara den absorberade SCALE-noden: pipelinevalet ska ga pa ADD (multi_add), inte pa dst->op
+    vk_pipeline pipeline = ggml_vk_op_get_pipeline(ctx, tensors[0], tensors[1], nullptr, dst, GGML_OP_ADD);
 
     if (pipeline == nullptr) {
         std::cerr << "ggml_vulkan: Error: Missing multi_add";
