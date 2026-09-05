@@ -10,12 +10,6 @@
 
 class llama_memory_hybrid_idx_context;
 
-static inline ggml_tensor * build_gdn_l2_norm(ggml_context * ctx, ggml_tensor * x, float eps) {
-    const float n = x->ne[0];
-
-    return ggml_scale(ctx, ggml_rms_norm(ctx, x, eps/n), 1.0f/sqrtf(n));
-}
-
 //
 // base classes
 //
@@ -2377,12 +2371,9 @@ struct llama_model_qwen4exp : public llama_model_base {
                         int64_t   row_offset,
                             int   il);
 
-        ggml_tensor * build_inp_ple(
-  const llama_memory_hybrid_idx_context * mctx_hyb);
-
         ggml_tensor * build_ple(
              llm_graph_input_rs * inp,
-                    ggml_tensor * emb,
+  const llama_memory_hybrid_idx_context * mctx_hyb,
                     ggml_tensor * hidden,
                             int   il);
 
