@@ -709,7 +709,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
         const int64_t n_draft_vocab = cur->ne[0];
         const int64_t n_outputs     = cur->ne[1];
         const int64_t n_vocab_full  = (int64_t) model.vocab.n_tokens();
-        GGML_ASSERT(model.d2t->type == GGML_TYPE_I64);
+        GGML_ASSERT(model.d2t->type == GGML_TYPE_I64 || model.d2t->type == GGML_TYPE_I32);
         GGML_ASSERT(model.d2t->ne[0] == n_draft_vocab);
         ggml_tensor * logits = ggml_fill(ctx0, ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, 1, n_vocab_full, n_outputs), -INFINITY);
         cur = ggml_set_rows(ctx0, logits,
