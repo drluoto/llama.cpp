@@ -20,6 +20,7 @@ layout (push_constant) uniform parameter2
     uint nb[12][4];
 
     uint rms_partials;
+    float scale;
 } p;
 
 // No readonly/writeonly decorations. Workaround for MoltenVK Bug, see https://github.com/ggml-org/llama.cpp/issues/15498
@@ -164,6 +165,7 @@ void main() {
             sum += load_a(s, src_idx(s, i00, i01, i02, i03));
         }
         sum_sq += sum*sum;
+        sum *= FLOAT_TYPE(p.scale);
         store_d(num_srcs, dst_idx(i00, i01, i02, i03), sum);
 
         idx += num_threads;

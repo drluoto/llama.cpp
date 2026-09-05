@@ -83,7 +83,8 @@ void rms_norm(uint num_iters) {
     sum = sumsh[0];
 
     const FLOAT_TYPE mean = sum / FLOAT_TYPE(ncols);
-    const FLOAT_TYPE scale = inversesqrt(mean + FLOAT_TYPE(p.param1));
+    // param2 != 0: en efterfoljande SCALE absorberad (rms_norm * c)
+    const FLOAT_TYPE scale = inversesqrt(mean + FLOAT_TYPE(p.param1)) * (p.param2 != 0.0f ? FLOAT_TYPE(p.param2) : FLOAT_TYPE(1.0f));
 
     if (do_multiply) {
         if (ncols > p.ne10) {

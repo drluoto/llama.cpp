@@ -1656,6 +1656,7 @@ struct vk_op_multi_add_push_constants {
     uint32_t nb[MAX_PARAMETER_COUNT][4];
 
     uint32_t rms_partials;
+    float scale; // absorberad efterfoljande SCALE (1.0 = ingen)
 };
 // update multi_add.comp if this changes
 static_assert(MAX_PARAMETER_COUNT == 12);
@@ -2446,6 +2447,9 @@ struct ggml_backend_vk_context {
     // number of additional consecutive nodes that are being fused with the
     // node currently being processed
     int num_additional_fused_ops {};
+    // en efterfoljande SCALE absorberad i RMS_NORM/MULTI_ADD (push-konstant)
+    bool  fused_scale_tail {};
+    float fused_out_scale {1.0f};
     // Bitmask of which fused ops need to write an intermediate value to memory.
     // Bit 'i' means nodes[start_of_fusion + i] writes to memory.
     // If there's no fusion, bit 0 is still set.
@@ -11384,9 +11388,9 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
         {
             if (ctx->num_additional_fused_ops > 0) {
                 if (ctx->do_add_rms_partials) {
-                    return ctx->device->pipeline_multi_add_rms[ctx->num_additional_fused_ops];
+                    return ctx->device->pipeline_multi_add_rms[ctx->num_additional_fused_ops - (ctx->fused_scale_tail ? 1 : 0)];
                 } else {
-                    return ctx->device->pipeline_multi_add[ctx->num_additional_fused_ops];
+                    return ctx->device->pipeline_multi_add[ctx->num_additional_fused_ops - (ctx->fused_scale_tail ? 1 : 0)];
                 }
             }
             if (ctx->do_add_rms_partials) {
@@ -11576,9 +11580,9 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
     case GGML_OP_RMS_NORM:
         if (src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
             if (ctx->do_add_rms_partials) {
-                return ctx->num_additional_fused_ops > 0 ? ctx->device->pipeline_rms_norm_mul_partials_f32 : ctx->device->pipeline_rms_norm_partials_f32;
+                return (ctx->num_additional_fused_ops > 0 && !ctx->fused_scale_tail) ? ctx->device->pipeline_rms_norm_mul_partials_f32 : ctx->device->pipeline_rms_norm_partials_f32;
             } else {
-                return ctx->num_additional_fused_ops > 0 ? ctx->device->pipeline_rms_norm_mul_f32 : ctx->device->pipeline_rms_norm_f32;
+                return (ctx->num_additional_fused_ops > 0 && !ctx->fused_scale_tail) ? ctx->device->pipeline_rms_norm_mul_f32 : ctx->device->pipeline_rms_norm_f32;
             }
         }
         return nullptr;
@@ -12624,13 +12628,14 @@ static void ggml_vk_multi_add(ggml_backend_vk_context * ctx, vk_context& subctx,
     // Make a list of all the tensors used by the op.
     // Last element of the list is the dest tensor.
     const ggml_tensor *tensors[MAX_PARAMETER_COUNT];
-    uint32_t num_srcs = ctx->num_additional_fused_ops + 2;
+    const int32_t n_extra_adds = ctx->num_additional_fused_ops - (ctx->fused_scale_tail ? 1 : 0);
+    uint32_t num_srcs = n_extra_adds + 2;
     uint32_t num_tensors = num_srcs + 1;
     GGML_ASSERT(num_tensors + ctx->do_add_rms_partials <= MAX_PARAMETER_COUNT);
 
     tensors[0] = first_node->src[0];
     tensors[1] = first_node->src[1];
-    for (int32_t i = 0; i < ctx->num_additional_fused_ops; ++i) {
+    for (int32_t i = 0; i < n_extra_adds; ++i) {
         // check whether the previous result is src[0] or src[1]
         if (cgraph->nodes[node_idx + i] == cgraph->nodes[node_idx + i + 1]->src[0]) {
             tensors[i+2] = cgraph->nodes[node_idx + i + 1]->src[1];
@@ -12654,6 +12659,7 @@ static void ggml_vk_multi_add(ggml_backend_vk_context * ctx, vk_context& subctx,
         pc.nb[i][3] = (uint32_t)t->nb[3] / sizeof(float);
     }
     pc.rms_partials = ctx->do_add_rms_partials;
+    pc.scale = ctx->fused_scale_tail ? ctx->fused_out_scale : 1.0f;
 
     vk_pipeline pipeline = ggml_vk_op_get_pipeline(ctx, tensors[0], tensors[1], nullptr, dst, dst->op);
 
@@ -13501,7 +13507,11 @@ static void ggml_vk_rms_norm(ggml_backend_vk_context * ctx, vk_context& subctx, 
     const ggml_tensor * src0;
     const ggml_tensor * src1;
 
-    if (ctx->num_additional_fused_ops > 0) {
+    if (ctx->num_additional_fused_ops > 0 && ctx->fused_scale_tail) {
+        // fused rms_norm + scale: samma plain-pipeline, skalan gar in via param2
+        dst = cgraph->nodes[node_idx + 1];
+        src0 = src1 = cgraph->nodes[node_idx]->src[0];
+    } else if (ctx->num_additional_fused_ops > 0) {
         // fused rms_norm + mul
         ggml_tensor *mul = cgraph->nodes[node_idx + 1];
         ggml_tensor *other_src = mul->src[0] == cgraph->nodes[node_idx + 0] ? mul->src[1] : mul->src[0];
@@ -13525,7 +13535,7 @@ static void ggml_vk_rms_norm(ggml_backend_vk_context * ctx, vk_context& subctx, 
         (uint32_t)src1->ne[0], (uint32_t)src1->ne[1], (uint32_t)src1->ne[2],(uint32_t)src1->ne[3], (uint32_t)src1->nb[0] / src1_type_size, (uint32_t)src1->nb[1] / src1_type_size, (uint32_t)src1->nb[2] / src1_type_size, (uint32_t)src1->nb[3] / src1_type_size,
         (uint32_t) dst->ne[0], (uint32_t) dst->ne[1], (uint32_t) dst->ne[2],(uint32_t) dst->ne[3], (uint32_t) dst->nb[0] /  dst_type_size, (uint32_t) dst->nb[1] /  dst_type_size, (uint32_t) dst->nb[2] /  dst_type_size, (uint32_t) dst->nb[3] /  dst_type_size,
         0,
-        op_params[0], 0.0f, (int32_t)param3,
+        op_params[0], ctx->fused_scale_tail ? ctx->fused_out_scale : 0.0f, (int32_t)param3,
     };
 
     // more than one fused op means rms_norm+mul+rope
@@ -17704,6 +17714,20 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
                 ctx->num_additional_fused_ops = num_adds - 1;
                 fusion_string = "MULTI_ADD";
                 std::fill_n(op_srcs_fused_elementwise, ctx->num_additional_fused_ops + 1, true);
+                // en efterfoljande SCALE (utan bias) absorberas i multi_add-kärnan
+                {
+                    const int last = i + ctx->num_additional_fused_ops;
+                    if (last + 1 < cgraph->n_nodes && cgraph->nodes[last + 1]->op == GGML_OP_SCALE &&
+                        ggml_get_op_params_f32(cgraph->nodes[last + 1], 1) == 0.0f &&
+                        cgraph->nodes[last + 1]->type == GGML_TYPE_F32 &&
+                        ggml_can_fuse(cgraph, last, { GGML_OP_ADD, GGML_OP_SCALE })) {
+                        ctx->fused_scale_tail = true;
+                        ctx->fused_out_scale = ggml_get_op_params_f32(cgraph->nodes[last + 1], 0);
+                        ctx->num_additional_fused_ops++;
+                        op_srcs_fused_elementwise[ctx->num_additional_fused_ops] = true;
+                        fusion_string = "MULTI_ADD_SCALE";
+                    }
+                }
             } else if (ggml_vk_can_fuse(ctx, cgraph, i, { GGML_OP_MUL_MAT, GGML_OP_ADD, GGML_OP_ADD })) {
                 ctx->num_additional_fused_ops = 2;
                 fusion_string = "MUL_MAT_ADD_ADD";
@@ -17773,6 +17797,16 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
                 fusion_string = "RMS_NORM_MUL";
                 // rms_norm is not elementwise, but whole rows must be consumed and the scale factor computed before
                 // they are overwritten, and one workgroup per row. So close enough.
+                op_srcs_fused_elementwise[0] = true;
+                op_srcs_fused_elementwise[1] = true;
+            } else if (ggml_vk_can_fuse(ctx, cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_SCALE }) &&
+                       ggml_get_op_params_f32(cgraph->nodes[i + 1], 1) == 0.0f &&
+                       cgraph->nodes[i]->type == GGML_TYPE_F32 && cgraph->nodes[i + 1]->type == GGML_TYPE_F32) {
+                // rms_norm foljd av ren skalning (qwen4exp l2-norm = rms_norm * 1/sqrt n): skalan in via param2
+                ctx->num_additional_fused_ops = 1;
+                ctx->fused_scale_tail = true;
+                ctx->fused_out_scale = ggml_get_op_params_f32(cgraph->nodes[i + 1], 0);
+                fusion_string = "RMS_NORM_SCALE";
                 op_srcs_fused_elementwise[0] = true;
                 op_srcs_fused_elementwise[1] = true;
             } else if (ggml_vk_can_fuse_ssm_conv(ctx, cgraph, i, 2)) {
@@ -17926,6 +17960,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
             }
             if (need_disable) {
                 ctx->num_additional_fused_ops = 0;
+                ctx->fused_scale_tail = false;
                 ctx->fused_ops_write_mask = 1;
                 ctx->fused_topk_moe_mode = TOPK_MOE_COUNT;
                 ctx->fused_topk_moe_scale = false;
@@ -17971,6 +18006,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
         }
         i += ctx->num_additional_fused_ops;
         ctx->num_additional_fused_ops = 0;
+        ctx->fused_scale_tail = false;
         ctx->fused_ops_write_mask = 0;
     }
 
