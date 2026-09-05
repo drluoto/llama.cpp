@@ -101,9 +101,18 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
     int64_t n_vocab_out = n_vocab;
     const struct ggml_tensor * d2t_meta = ml.get_tensor_meta("d2t");
     if (mtp_only && d2t_meta) {
-        n_vocab_out = d2t_meta->ne[0];
-        d2t = create_tensor(tn(LLM_TENSOR_D2T), { n_vocab_out }, 0);
-        LLAMA_LOG_INFO("%s: QWEN4EXP MTP using d2t draft-vocab trim (n_vocab_out = %lld)\n", __func__, (long long) n_vocab_out);
+        if (d2t_meta->ne[0] == n_vocab) {
+            // invers karta: t2d[v] = komprimerad rad for v, eller n_draft (sentinel) om v saknas
+            const struct ggml_tensor * out_meta = ml.get_tensor_meta("output.weight");
+            GGML_ASSERT(out_meta && "t2d-trim kraver eget output.weight");
+            n_vocab_out = out_meta->ne[1];
+            d2t = create_tensor(tn(LLM_TENSOR_D2T), { n_vocab }, 0);
+            LLAMA_LOG_INFO("%s: QWEN4EXP MTP using t2d (inverse) draft-vocab trim (n_vocab_out = %lld)\n", __func__, (long long) n_vocab_out);
+        } else {
+            n_vocab_out = d2t_meta->ne[0];
+            d2t = create_tensor(tn(LLM_TENSOR_D2T), { n_vocab_out }, 0);
+            LLAMA_LOG_INFO("%s: QWEN4EXP MTP using d2t draft-vocab trim (n_vocab_out = %lld)\n", __func__, (long long) n_vocab_out);
+        }
     }
 
     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, 0);
@@ -703,7 +712,20 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
     cur = build_lora_mm(model.output, cur, model.output_s);
     cb(cur, "result_output", -1);
 
-    if (model.d2t) {
+    if (model.d2t && model.d2t->ne[0] == (int64_t) model.vocab.n_tokens()) {
+        // invers karta (t2d): samla fulla logits med get_rows ur [n_out, n_draft+1] dar sista raden ar -inf
+        const int64_t n_draft_vocab = cur->ne[0];
+        const int64_t n_outputs     = cur->ne[1];
+        const int64_t n_vocab_full  = (int64_t) model.vocab.n_tokens();
+        GGML_ASSERT(model.d2t->type == GGML_TYPE_I32);
+        ggml_tensor * ct   = ggml_cont(ctx0, ggml_transpose(ctx0, cur));                                    // [n_out, n_draft]
+        ggml_tensor * sent = ggml_fill(ctx0, ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_outputs, 1), -INFINITY); // [n_out, 1]
+        ggml_tensor * ext  = ggml_concat(ctx0, ct, sent, 1);                                                // [n_out, n_draft+1]
+        ggml_tensor * full = ggml_get_rows(ctx0, ext, model.d2t);                                           // [n_out, n_vocab]
+        cur = ggml_cont(ctx0, ggml_transpose(ctx0, full));                                                  // [n_vocab, n_out]
+        GGML_ASSERT(cur->ne[0] == n_vocab_full && cur->ne[1] == n_outputs && n_draft_vocab > 0);
+        cb(cur, "result_output_t2d", -1);
+    } else if (model.d2t) {
         // sprid de komprimerade logitsen till full vokabularform (ovriga -inf), sa att
         // sampling/verifiering aldrig behover veta att utkastet bara poangsatte en delmangd
         const int64_t n_draft_vocab = cur->ne[0];
