@@ -317,6 +317,12 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
     ggml_set_input(inp->h);
     ggml_set_name(inp->h, "mtp_h_input");
 
+    // CIRU H121: fortsattningssteget skriver dessa indata igen efter att grafen korts; utan
+    // output-flaggan far allokeraren atervinna deras lagring mellan stegen (sidfel pa HIP,
+    // tyst skrap pa Vulkan -> icke-deterministiska utkast).
+    ggml_set_output(inp->tokens);
+    ggml_set_output(inp->h);
+
     ggml_tensor * h_wide = inp->h;
 
     res->add_input(std::move(inp));
