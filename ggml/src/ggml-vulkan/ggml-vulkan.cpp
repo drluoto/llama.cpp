@@ -12943,7 +12943,9 @@ static void ggml_vk_gated_linear_attn(ggml_backend_vk_context * ctx, vk_context&
 
 static int ggml_vk_try_gdn_cache_fusion(const ggml_cgraph * cgraph, int node_idx, vk_gdn_fused_cache & fc) {
     static const bool disable_fusion = getenv("GGML_VK_DISABLE_FUSION") != nullptr && std::atoi(getenv("GGML_VK_DISABLE_FUSION")) != 0;
-    if (disable_fusion) return 0;
+    // GGML_VK_DISABLE_GDN_CACHE_FUSION=1: bisektionsgrind for #27973-porten (GDN + CPY av tillstandssvansen)
+    static const bool disable_gdn_fusion = getenv("GGML_VK_DISABLE_GDN_CACHE_FUSION") != nullptr && std::atoi(getenv("GGML_VK_DISABLE_GDN_CACHE_FUSION")) != 0;
+    if (disable_fusion || disable_gdn_fusion) return 0;
     const ggml_tensor * gdn = cgraph->nodes[node_idx];
     if (gdn->op != GGML_OP_GATED_DELTA_NET || gdn->type != GGML_TYPE_F32 || (gdn->flags & GGML_TENSOR_FLAG_OUTPUT)) return 0;
     const ggml_tensor * src_v = gdn->src[2];
