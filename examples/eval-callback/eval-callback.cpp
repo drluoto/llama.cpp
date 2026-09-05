@@ -31,6 +31,21 @@ static bool run(llama_context * ctx, const common_params & params) {
         return false;
     }
 
+    // girig generering av n_predict tokens sa att avkodningssteget ocksa loggas
+    const int n_predict = params.n_predict > 0 ? params.n_predict : 0;
+    const int n_vocab   = llama_vocab_n_tokens(vocab);
+    for (int i = 0; i < n_predict; ++i) {
+        const float * logits = llama_get_logits_ith(ctx, -1);
+        llama_token best = 0;
+        for (int v = 1; v < n_vocab; ++v) { if (logits[v] > logits[best]) best = v; }
+        LOG_INF("gen %d: token %d\n", i, best);
+        if (llama_vocab_is_eog(vocab, best)) break;
+        if (llama_decode(ctx, llama_batch_get_one(&best, 1))) {
+            LOG_ERR("%s : failed to eval gen %d\n", __func__, i);
+            return false;
+        }
+    }
+
     return true;
 }
 
