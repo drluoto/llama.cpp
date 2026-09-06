@@ -3997,6 +3997,32 @@ static std::vector<uint32_t> get_fa_spec_constants(const vk_fa_pipeline_state& s
     };
 }
 
+// LDS-bankspridning for coopmat-matmulrutorna (port av nathanw1014 baf6360be + 3ca6f21f2).
+// buf_a/buf_b ar FLOAT_TYPEV2 (4 B), sa stride i element = stride i LDS-banker; RDNA har 32:
+// SHMEM_STRIDE = BK/2 + pad nar 32/gcd(BK/2+pad, 32) banker. Pad 2 (stride 18, 16 banker) mater
+// +13 % over pad 4 pa den kvantiserade vagen (BK 32). Stride 18 (72 B) ar utanfor coopMatLoads
+// 16 B-kontrakt; RADV >= 25.3 sanker till ds_read_b64 dar det ar harmlost, RADV <= 25.2 betalar
+// -60 %. Darfor bara pa Mesa RADV >= 25.3.0. GGML_VK_SHMEM_PAD=N overstyr for provning.
+static uint32_t ggml_vk_coopmat_shmem_pad(const vk_device& device, uint32_t bk) {
+    if (device->vendor_id == VK_VENDOR_ID_INTEL && device->coopmat_support &&
+        device->driver_id == vk::DriverId::eIntelProprietaryWindows) {
+        return 0;
+    }
+    static const int env_pad = [] {
+        const char * e = getenv("GGML_VK_SHMEM_PAD");
+        return e ? atoi(e) : -1;
+    }();
+    if (env_pad >= 0) {
+        return (uint32_t) env_pad;
+    }
+    if (device->coopmat_support && bk >= 32 &&
+        device->driver_id == vk::DriverId::eMesaRadv &&
+        device->properties.driverVersion >= VK_MAKE_API_VERSION(0, 25, 3, 0)) {
+        return 2;
+    }
+    return 4;
+}
+
 static bool ggml_vk_matmul_shmem_support(const vk_device& device, const std::vector<uint32_t>& warptile, bool mul_mat_id, ggml_type src0_type) {
 
     uint32_t lut_size = 0;
@@ -4036,10 +4062,11 @@ static bool ggml_vk_matmul_shmem_support(const vk_device& device, const std::vec
     }
 
     // Needs to be kept up to date on shader changes
-    // Needs to stay aligned with ggml_vk_mul_mm_spec.
-    const bool intel_shmem_stride_pad_zero = device->vendor_id == VK_VENDOR_ID_INTEL && device->coopmat_support &&
-                                              device->driver_id == vk::DriverId::eIntelProprietaryWindows;
-    const uint32_t bank_conflict_offset = intel_shmem_stride_pad_zero ? 0 : (device->coopmat_support ? 8 : 1);
+    // Delad minnesbudget: BM*(BK + 2*pad)*type_size, sa offseten ar 2x den pad som
+    // ggml_vk_mul_mm_spec faktiskt skickar. Bada anropar ggml_vk_coopmat_shmem_pad.
+    const uint32_t bank_conflict_offset = device->coopmat_support
+                                          ? 2 * ggml_vk_coopmat_shmem_pad(device, warptile[3])
+                                          : 1;
     const uint32_t type_size = device->fp16 ? sizeof(ggml_fp16_t) : sizeof(float);
     const uint32_t warps = warptile[0] / warptile[10];
 
@@ -4658,10 +4685,13 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
 
     auto const &ggml_vk_mul_mm_spec = [&device](std::vector<uint32_t> spec, bool aligned) {
         spec.push_back(aligned ? 1u : 0u);  // constantID=11: ALIGNED
-        if (device->vendor_id == VK_VENDOR_ID_INTEL && device->coopmat_support &&
-            device->driver_id == vk::DriverId::eIntelProprietaryWindows) {
-            spec.push_back(0u);  // constantID=12: SHMEM_STRIDE_PAD = 0
-            spec.push_back(1u);  // constantID=13: APPLY_SLM_A_RESHAPE = true
+        const uint32_t bk  = spec[3];
+        const uint32_t pad = ggml_vk_coopmat_shmem_pad(device, bk);
+        const bool intel_slm = device->vendor_id == VK_VENDOR_ID_INTEL && device->coopmat_support &&
+                               device->driver_id == vk::DriverId::eIntelProprietaryWindows;
+        if (intel_slm || pad != 4) {
+            spec.push_back(pad);                    // constantID=12: SHMEM_STRIDE_PAD
+            spec.push_back(intel_slm ? 1u : 0u);    // constantID=13: APPLY_SLM_A_RESHAPE
         }
         return spec;
     };
@@ -10233,7 +10263,10 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx, vk_context& 
     // n_as counts, n_as offsets, one total, then one packed row id per (expert, token).
     // Hoisting requires 16-bit indices for the packing and a table that fits one binding.
     const uint64_t hoisted_row_id_words = 2 * n_as + 1 + nei0 * nei1;
-    const bool hoist_row_ids = n_as <= 256 && nei0 <= 0xffff && nei1 <= 0xffff &&
+    // 512: count_experts.comp:s MAX_EXPERTS (lyft fran 256 for Flash-Next, 2026-09-06)
+    static const char * hoist_env = getenv("GGML_VK_MMID_HOIST");
+    static const bool hoist_enabled = !(hoist_env && atoi(hoist_env) == 0);
+    const bool hoist_row_ids = hoist_enabled && n_as <= 512 && nei0 <= 0xffff && nei1 <= 0xffff &&
                                 hoisted_row_id_words * sizeof(uint32_t) <=
                                     ctx->device->properties.limits.maxStorageBufferRange;
 
