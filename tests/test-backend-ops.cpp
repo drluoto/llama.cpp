@@ -6038,6 +6038,12 @@ struct test_concat : public test_case {
 
             b = ggml_view_4d(ctx, b, ne_b[0], ne_b[1], ne_b[2], ne_b[3], b->nb[1], b->nb[2], b->nb[3], 0);
             ggml_set_name(b, "view_of_b");
+        } else if (v & 16) {
+            // transponerad b, som delta-nets conv-tillstand (ggml_transpose -> dim-0 concat)
+            b = ggml_new_tensor_2d(ctx, type, ne_b[1], ne_b[0]);
+            ggml_set_name(b, "b");
+            b = ggml_transpose(ctx, b);
+            ggml_set_name(b, "transpose_of_b");
         } else {
             b = ggml_new_tensor(ctx, type, 4, ne_b.data());
             ggml_set_name(b, "b");
@@ -9663,6 +9669,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     for (int v : { 0, 1, 2, 3 }) {
         for (int dim : { 0, 1, 2, 3, }) {
             test_cases.emplace_back(new test_concat(GGML_TYPE_F32, {11, 12, 13, 14}, 7, dim, v));
+            if (dim == 0 && v == 0) {
+                test_cases.emplace_back(new test_concat(GGML_TYPE_F32, {11, 12, 1, 1}, 7, 0, 16));
+                test_cases.emplace_back(new test_concat(GGML_TYPE_F32, {4, 2048, 1, 1}, 4096, 0, 16));
+                test_cases.emplace_back(new test_concat(GGML_TYPE_F32, {3, 100, 1, 1}, 70, 0, 16));
+                test_cases.emplace_back(new test_concat(GGML_TYPE_I32, {5, 40, 1, 1}, 33, 0, 16));
+            }
             test_cases.emplace_back(new test_concat(GGML_TYPE_F16, {11, 12, 13, 14}, 7, dim, v));
             test_cases.emplace_back(new test_concat(GGML_TYPE_BF16, {11, 12, 13, 14}, 7, dim, v));
             test_cases.emplace_back(new test_concat(GGML_TYPE_I8, {11, 12, 13, 14}, 7, dim, v));
