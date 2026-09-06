@@ -15,6 +15,21 @@ Measured on 10 real agent conversations replayed against the server (medians), p
 
 Without speculation the same trunk decodes at about 27 tok/s, which is where the memory bandwidth of this box puts it. Greedy output is bit-identical between runs.
 
+Before and after across workloads, single stream, greedy, nothing cached. "Original" is the stack I ran on September 4: apepojken's build, the stock UD-IQ4_XS, the full Q8_0 draft head, `draft-mtp,ngram-mod` with n-max 6. Decode in tokens per second:
+
+| workload | original | no speculation | this branch | this branch, n-max 6 |
+|---|---:|---:|---:|---:|
+| short code, no context | 49.0 | 32.8 | 58.1 | |
+| new code @8k | 30.7 | 29.6 | 41.6 | |
+| prose @8k | 23.6 | 29.3 | 30.1 | |
+| file rewrite @8k | 30.9 | 29.0 | 55.4 | 63.2 |
+| new code @32k | 34.5 | 25.1 | 37.8 | |
+| file rewrite @32k | 37.4 | 25.1 | 48.5 | 55.2 |
+
+Prefill went from 340 to 510 tok/s at 8k and from 280 to 390 at 32k.
+
+Two notes on reading it. On file rewrites the drafter is right almost every time, so decode is limited only by draft length; `--spec-draft-n-max 6` is the setting for that kind of job, but it halves prose speed, so the default here is 3. And ngram-mod, which looked great on ROCm in August, loses on Vulkan: its 64-token drafts make every verify step cost 200–500 ms, so it is off.
+
 ## What is in the branch
 
 Relative to plain llama.cpp master, in order of effect:
